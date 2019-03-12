@@ -1,0 +1,37 @@
+Okay, we get files from pgp with a list of orders to execute. Sales finish before buys start, and all orders in either happen in parallel.
+Each of these orders is encapsulated in an 'act'.
+Each act is based on a state machine, which controls what could happen to it.
+
+Flow Chart                                                          States
+
+New                                                                 NEW
+ |
+ V       no
+Valid?  ----> Invalid act                                           VALID / INVALID
+ |
+ | yes
+ V
+Update orders <----------------------------------------             TRIGGERED (is sync. not sure if needed)
+ |                 |                                  |
+ V                 |                                  |
+Wait               |                                  |             WAIT
+ |                 |                                  |
+ |-> Timer --------|                                  |
+ |                 |                                  |
+ |-> Updated ob ----                                  |
+ |                                                 no |
+ |-> Executions -> Could our order have been hit? ----|
+                                |                     |
+                                | yes                 |
+                                V                     |
+                          Fetch balances              |             FETCH_BALANCES
+                                |                     |
+                                V       no            |
+                              Done? ------------------|
+                                |
+                                | yes
+                                V
+                              Done.                                 DONE
+
+Check other flags if they should fit in the state machine - triggerRunning, market_order
+Also - balances are global, not per act.
