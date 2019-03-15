@@ -24,7 +24,7 @@ Wait               |                                  |             WAIT
                                 |                     |
                                 | yes                 |
                                 V                     |
-                          Fetch balances              |             FETCH_BALANCES
+                          Fetch balances              |             FETCH_BALANCES (PENDING_ADD / PENDING_REMOVE / PENDING MOVE?)
                                 |                     |
                                 V       no            |
                               Done? ------------------|

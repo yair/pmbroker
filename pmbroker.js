@@ -9,6 +9,9 @@ const n = require('./nijez');
 const Act = require('./act');
 var Inotify = require('inotify').Inotify;
 var inotify = new Inotify();
+c['exch'] = require('./' + c['EXCHANGE']);
+c['confabulator'] = require('./rlexecConfabulator');
+c['confabulator'].init (c);
 var acts = [];
 
 inotify.addWatch({
@@ -26,7 +29,7 @@ l.i('Up and listening for orders on ' + c['VOLATILE_DIR'] + c['ORDERS_FN']);
 
 function processOrders() {
 
-    let acts = [];
+//    let acts = [];
     let fn = c['VOLATILE_DIR'] + c['ORDERS_FN'];
     fs.readFile (fn, 'utf8', function (err, data) {
 
@@ -44,10 +47,11 @@ function processOrders() {
         }
     }
     /* var timer = */ setInterval (triggerAll, c['TIMER_PERIOD']);
-    runAllSells (acts); //runAllBuys? Nijez summary?
+    c['SALES_DONE'] = false;
+    runAllSells (); //runAllBuys? Nijez summary?
 }
 
-function runAllSells (acts) {
+function runAllSells () {
 
     for (i in acts) {
 
@@ -58,7 +62,7 @@ function runAllSells (acts) {
     }
 }
 
-function runAllBuys (acts) {
+function runAllBuys () {
 
     for (i in acts) {
 
@@ -69,9 +73,43 @@ function runAllBuys (acts) {
     }
 }
 
-function triggerAll (acts) {
+function triggerAll () {
+
+    if (triggerAllActs('Sell'))
+        return;
+
+    if (!c['SALES_DONE']) {
+
+        c['SALES_DONE'] = true;
+        runAllBuys();
+    }
+
+    if (triggerAllActs('Buy'))
+        return;
+
+    summarizeRun();
+    process.exit(0);
 }
 
+function triggerAllActs(type) {
+
+    let ret = false;
+
+    for (i in acts) {
+
+        if (acts[i]['type'] == type && acts[i].canBeTriggered()) {
+
+            acts[i].trigger();
+            ret = true;
+        }
+    }
+    return ret;
+}
+
+function summarizeRun() {
+
+    l.d('Acts after run:' + JSON.stringify(acts, null, 2));
+}
 
 // get config
 // open listener
