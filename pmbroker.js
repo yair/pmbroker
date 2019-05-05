@@ -2,24 +2,27 @@
 
 const fs = require ('fs');
 const argv = require('minimist')(process.argv.slice(2));
-const c = JSON.parse (fs.readFileSync (argv['c']));
+// const c = JSON.parse (fs.readFileSync (argv['c']));
+const c = require('./' + argv['c']);
+console.log('Config: ' + JSON.stringify(c, null, 2));
 const l = require ('./log');
 const u = require('./utils');
 const n = require('./nijez');
 const Act = require('./act');
 var Inotify = require('inotify').Inotify;
 var inotify = new Inotify();
-c['exch'] = require('./' + c['EXCHANGE']);
+l.v('Using exchange ' + c['EXCHANGE']);
+c['exch'] = require('./' + c['EXCHANGE']).get_instance();
+//c['exch'] = import('./' + c['EXCHANGE']).get_instance();
 c['confabulator'] = require('./rlexecConfabulator');
 c['confabulator'].init (c);
 var acts = [];
-
 inotify.addWatch({
     path:       c['VOLATILE_DIR'],
     watch_for:  Inotify.IN_CLOSE_WRITE,
     callback:   function (event) {
         if (event.name == c['ORDERS_FN']) {
-            l.i(`${event.name} closed.`);
+            l.d(`${event.name} close detected. Will consume.`);
             processOrders();
         }
     }
@@ -37,18 +40,19 @@ function processOrders() {
             l.e(`Error reading file ${fn}: ${err}`);
             return;
         }
-        l.d(c['ORDERS_FN'] + " dump: " + data);
+        l.v(c['ORDERS_FN'] + " dump: " + data);
         let json = JSON.parse(data);
         c['TIMEOUT'] = json['timeout'];
         var actions = json['actions'];
         for (i in actions) {
 
             acts[i] = new Act (actions[i], c);
+            l.d('act no. ' + i + ' just created (' + acts[i].type + ' ' + acts[i].amount + ' ' + acts[i].mname + '). state is ' + acts[i].state);
         }
-    }
-    /* var timer = */ setInterval (triggerAll, c['TIMER_PERIOD']);
-    c['SALES_DONE'] = false;
-    runAllSells (); //runAllBuys? Nijez summary?
+        /* var timer = */ setInterval (triggerAll, c['TIMER_PERIOD']);
+        c['SALES_DONE'] = false;
+        runAllSells (); //runAllBuys? Nijez summary?
+    });
 }
 
 function runAllSells () {
@@ -57,6 +61,7 @@ function runAllSells () {
 
         if (acts[i]['type'] == 'Sell') {
 
+            l.d('About to run act no. ' + i + ' (' + acts[i].type + ' ' + acts[i].amount + ' ' + acts[i].mname + ')');
             acts[i].run();
         }
     }
@@ -68,6 +73,7 @@ function runAllBuys () {
 
         if (acts[i]['type'] == 'Buy') {
 
+            l.d('About to run act no. ' + i + ' (' + acts[i].type + ' ' + acts[i].amount + ' ' + acts[i].mname + ')');
             acts[i].run();
         }
     }
@@ -95,11 +101,13 @@ function triggerAllActs(type) {
 
     let ret = false;
 
-    for (i in acts) {
+    for (let i in acts) {
 
+        l.d('triggerAllActs for type ' + type + ': acts[' + i + '][type]=' + acts[i]['type'] + ' canBeTriggered=' + acts[i].canBeTriggered());
         if (acts[i]['type'] == type && acts[i].canBeTriggered()) {
 
-            acts[i].trigger();
+            l.d('triggerAllActs: Triggering act[' + i + ']')
+            acts[i].trigger([]);
             ret = true;
         }
     }

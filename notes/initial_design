@@ -11,7 +11,7 @@ Valid?  ----> Invalid act                                           VALID / INVA
  |
  | yes
  V
-Update orders <----------------------------------------             TRIGGERED (is sync. not sure if needed)
+Update orders <----------------------------------------             nope. (was TRIGGERED (is sync. not sure if needed))
  |                 |                                  |
  V                 |                                  |
 Wait               |                                  |             WAIT
@@ -24,14 +24,44 @@ Wait               |                                  |             WAIT
                                 |                     |
                                 | yes                 |
                                 V                     |
-                          Fetch balances              |             FETCH_BALANCES (PENDING_ADD / PENDING_REMOVE / PENDING MOVE?)
+                          Fetch balances              |             BLOCKED (was FETCH_BALANCES (PENDING_ADD / PENDING_REMOVE / PENDING MOVE?) Simply PENDING?)
                                 |                     |
                                 V       no            |
                               Done? ------------------|
                                 |
                                 | yes
                                 V
-                              Done.                                 DONE
+                              Finalize.                                 DONE
+                                |
+                                |
+                                V
+                              Finalized.                                FINALIZED
 
 Check other flags if they should fit in the state machine - triggerRunning, market_order
 Also - balances are global, not per act.
+I don't like FETCH_BALANCES. I prefer to have a BLOCKED state and pending triggers waiting for it to release.
+TRIGGERED is also unneded. We have blocked and WAIT, and that's it.
+We need to actually store the pending events beacuse they might say we made a trade at that time (so do they store the act as part of the metadata? This is intractable...).
+We're gonna stop pretending to support multiple parallel orders.
+What is this order moved to 0? How did we get a new order '0'?
+TODO:
+4. Round up remainder if less than min trade (did we do that already?). Also, don't move partials if remainder is less the min trade and stuff (prev was imperfect).
+6. Moving orders no longer crashes, but doesn't move orders. :/ Now it does move but only once. Are we propagating the order number correctly?
+    - 'Error: Invalid order number, or you are not the person who placed the order.' is an error that polobroker still gets, unsolved. Where does it come from? The order number has changed. Aha!
+    We think we have 578899087582 but there exist 578898754915 and 578899097572. Firstly, if two orders exist, we should nuke at least one, maybe both.
+    Secondly, did we see either before? Nope, neither. Bloody poloni. Fuck this, we should nuke and repost always.
+    Are we absolutely sure move can't be made to work? It'd be a pity to give it up.
+    Support contacted. Simply cancel and re-place for now.
+    BTW, this is utter crap also because you can't recreate a sub-min partial.
+    Polo sez I'm stoopid and they return the new ID. Create a test script to verify and send them the results if they're wrong.
+7. Are we fetching balances too often? Can we tell if our order has been hit? See log.2019-04-29T04:36:20Z for an example of what appears to be a useless fetch.
+8. Make sure that if you're calling the api from the resoponse to an API call, you don't call the callback but hand it forward, so the block won't be released prematurely. This shouldn't be done through handle_error.
+9. Crap. Trying close_and_reopen got stuck in between. After 72 times :O. Maybe I just imagined it was stuck, 'cause that's where the log ends.
+
+DONE:
+1. review trigger locking. I think we're double entering this func, not always when it's blocked.
+    - Don't sleep without a lock until you exit trigger, is that it?
+    - Not only double entering, also when it finally appears in active, the order doesn't have the results. 8|
+2. The second time we update the order it's suddenly null, maybe for the same reason. Main issue with this is that we're getting dupe orders.
+3. Don't just copy the polo result after placing an order, copy the data fields as it doesn't contain the basic order params.
+5. Getting 'invalid API pair' from poloni. WTF? Are we colliding with polobroker or something? We manage to create these order just fine with that pair. :/
