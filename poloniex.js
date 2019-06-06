@@ -4,6 +4,9 @@ const fs = require('fs');
 const PoloniexAPI = require('poloniex-api-node');
 const l = require ('./log');
 const CircularJSON = require('circular-json');
+const u = require('./utils');
+
+var initialized_cb = null;
 
 module.exports = (function () { // Closure based singleton
  
@@ -19,20 +22,132 @@ module.exports = (function () { // Closure based singleton
         }
 		var markets = {};
 		var balances = {};
+        var order_lut = {};
+        var acc_balance = 0.;
+        var accnotifs = [];
 //		inst.fetching_balances = false;      // Do we need a timeout on this? // Isn't that part of the state machine?
+
+        var balances_fetched = false,
+            websocket_open   = false,
+            accnotif_registered = false
+            strays_cancelled = false;
+
+        function init_done() { return balances_fetched && websocket_open && accnotif_registered && strays_cancelled; }
 
 		var secrets = JSON.parse(fs.readFileSync ('poloniex_secrets.json', 'utf8'));
 		var api = new PoloniexAPI(secrets['key'], secrets['secret'], { nonce: () => Date.now() * 2000 });
 		api.on('message', on_message);
-		api.on('open', () =>  { l.i ('WebSocket stream open') });
+		api.on('open', () =>  {
+            l.i ('WebSocket stream open')
+            websocket_open = true;
+            l.d('balances_fetched=' + balances_fetched + ' websocket_open='+websocket_open + 'accnotif_registered=' + accnotif_registered + 'strays_cancelled=' + strays_cancelled);
+//            if (balances_fetched && websocket_open && accnotif_registered && strays_cancelled) initialized_cb();
+            if (init_done()) initialized_cb();
+        });
+
 		api.on('close', on_close);
-		api.on('error', (error) => { l.e('Poloniex ERROR: ' + error) });
+//		api.on('error', (error) => { l.e('Poloniex ERROR: ' + error) });
+		api.on('error', (error) => { u.crash('Poloniex ERROR: ' + error) });
 		api.on('heartbeat', () => { l.v('Poloniex heartbeat') });
 		api.openWebSocket({ version: 2 });
         api.subscribe('accountNotifications');
-		//cancel_all_orders_and_fetch_balances(); Why can't private functions call public ones?
+//		cancel_all_orders_and_fetch_balances(); // Why can't private functions call public ones? This needs to be solved because with accnotif we won't be fetching balances again. Nah, fetching open orders only works on a per-market basis. Let's hope we don't crash, cancel stray orders at the end and hope we're getting a clean slate on startup. :/
+        // "XEM":{"available":"2.61408745","onOrders":"0.00000000","btcValue":"0.00002964"}
+        fetch_balances( (b) => {
+            l.i('Poloniex balances fetched');
+            l.v('Fetched Balances: ' + JSON.stringify(b));
+            balances = b;
+            if (cancel_strays(b))
+                strays_cancelled = true;
+            Object.values(balances).map( (b) => { acc_balance += parseFloat(b['btcValue']); } );
+            l.d('Polo: Total account value is ' + (1000. * acc_balance).toPrecision(6) + 'mB');
+            balances_fetched = true;
+            l.d('balances_fetched=' + balances_fetched + ' websocket_open='+websocket_open + 'accnotif_registered=' + accnotif_registered + 'strays_cancelled=' + strays_cancelled);
+//            if (balances_fetched && websocket_open && accnotif_registered && strays_cancelled) initialized_cb();
+            if (init_done()) initialized_cb();
+        });
 //		inst.state = 'READY';
  
+        function fetch_balances(cb=null) {
+
+//            l.e('inst before fetching balances: ' + JSON.stringify(inst));
+//	        if (!function.fetching_balances) { // Really? Isn't all locking done on the act level?
+
+//	            this.fetching_balances = true;
+//                this.needs_fetch_balances = false;
+            l.d('Polo: About to fetch balances.');
+            api.returnCompleteBalances("exchange", function (err, _balances) {
+
+                if (err) { u.crash('Error fetching balances: ' + err); }
+//                if (err) { l.e ('Error fetching balances: ' + err); handle_error(err); }
+                l.d('Polo: Balances fetched.'); //: ' + JSON.stringify(_balances));
+
+                l.d('Polo: BTC balance: ' + JSON.stringify(_balances['BTC']));
+                balances = _balances;
+//                l.e('inst after fetching balances: ' + CircularJSON.stringify(inst));
+//                this.fetching_balances = false;
+                if (cb) { cb(balances); }       // TODO: We can tell here if there're any stray orders and cancel them!
+            });
+//        }
+        }
+
+        function cancel_strays(b) {
+
+            let ret = true; // meaning no strays found
+            // "onOrders":"0.00000000"
+            for (let aid in Object.keys(b)) {
+                let a = Object.keys(b)[aid];
+//                l.d('scanning ' + a + ' => ' + JSON.stringify(b[a]));
+                if (b[a]['onOrders'] != "0.00000000") {
+                    l.w('Polo: Found stray orders in market ' + a + ': ' + JSON.stringify(b[a]));
+                    ret = false;
+                }
+            }
+            if (ret) return ret;
+
+            l.i('Polo: Cancelling stray orders.');
+
+            api.returnOpenOrders('all', (err, body) => {
+
+                if (err) { u.crash('Error fetching balances: ' + err); }
+//                if (err) { l.e ('Error fetching balances: ' + err); handle_error(err); }
+
+                var strays_to_be_cancelled = 0,
+                    strays_actually_cancelled = 0;
+
+                for (let mid in Object.keys(body)) {
+                    let m = Object.keys(body)[mid];
+                    if (body[m] == []) continue;
+                    l.d('Polo: stray orders in market ' + m + ': ' + JSON.stringify(body[m]));
+
+                    for (let oid in body[m]) {
+                        let o = body[m][oid];
+                        l.d('Polo: Cancelling order ' + m + ': ' + JSON.stringify(o));
+                        strays_to_be_cancelled++;
+                        api.cancelOrder(o['orderNumber'], (err, body) => {
+
+                            if (err) { u.crash('Polo: Error cancelling order ' + m + ': ' + JSON.stringify(o) + ': ' + err); }
+//                            if (err) { l.e ('Polo: Error cancelling order ' + m + ': ' + JSON.stringify(o) + ': ' + err); handle_error(err); }
+
+                            strays_actually_cancelled++;
+
+                            l.d('Polo: Order ' + strays_actually_cancelled + '/' + strays_to_be_cancelled + ' cancelled: ' + m + ': ' + JSON.stringify(o));
+
+                            if (strays_to_be_cancelled == strays_actually_cancelled) {
+                                l.d('Polo: Done cancelling (' + strays_actually_cancelled + ') strays.');
+                                strays_cancelled = true;
+                                l.d('balances_fetched=' + balances_fetched + ' websocket_open='+websocket_open + 'accnotif_registered=' + accnotif_registered + 'strays_cancelled=' + strays_cancelled);
+//                                if (balances_fetched && websocket_open && accnotif_registered && strays_cancelled) initialized_cb();
+                                if (init_done()) initialized_cb();
+                            }
+                        });
+                    }
+                }
+            });
+
+            return ret;
+        }
+
         function normalize_message(channelName, data, seq) {
 
             var evs = [];
@@ -52,6 +167,9 @@ module.exports = (function () { // Closure based singleton
 	                return markets[channelName]['trigger'](normalize_message(channelName, data, seq));
 	            }
 	        }
+            if (channelName == 'accountNotifications') { // Need to handle all of them here. Can we trust these to arrive before command callback? I don't want to remove the lock before we're updated. :/
+                return handle_account_notification(data);
+            }
 	        l.w('Unhandled message in unrecognized channel ' + channelName + '. data=' + data + ', seq=' + seq);
 	    }
 
@@ -63,12 +181,105 @@ module.exports = (function () { // Closure based singleton
 	        l.i ('connection closed. reason: ' + reason + ' details: ' + details);
 	    }
 
-        function handle_error(e) {
-            l.d("*** POLO ERROR: " + JSON.stringify(e) + " Stack: " + new Error().stack);
+/*        function handle_error(e) {  // TODO: deprecated by u.crash()
+            l.d("*** POLO ERROR: " + JSON.stringify(e) + " Stack: " + new Error().stack); // TODO: nijez and exit
             // process.exit(1);
             // Exit prog on some of the errors (e.g., 403 unauthorized)
             // Other actions on other errors (e.g. reduce trade size on in sufficient funds)
             //
+        }*/
+
+        function handle_account_notification(data) {
+            l.d('New accountNotification message: ' + JSON.stringify(data));
+            accnotifs.push(data);
+            if ( data == 'subscriptionSucceeded') {
+                l.i("Poloniex: Account Notification stream open.");
+                accnotif_registered = true;
+            l.d('balances_fetched=' + balances_fetched + ' websocket_open='+websocket_open + 'accnotif_registered=' + accnotif_registered + 'strays_cancelled=' + strays_cancelled);
+//                if (balances_fetched && websocket_open && accnotif_registered && strays_cancelled) initialized_cb();
+                if (init_done()) initialized_cb();
+            } else {
+                var new_order = null, old_order = null, mname = null, new_trades = [];
+                for (var did in data) {
+                    datum = data[did];
+                    if ('wallet' in datum['data'] && datum['data']['wallet'] == 'margin') {
+                        l.d('Polo Accnotif: This is about margin wallets. Will silently return.');
+                        return;
+                    }
+                    switch (datum['type']) {
+                        case 'balanceUpdate':
+                            l.d('Polo: BTC balance: ' + JSON.stringify(balances['BTC'])); // Why can't we access this?!
+                            l.d('Polo Accnotif: updating balance balances[' + datum['data']['currency'] + '][\'available\']');
+                            l.d('Polo Accnotif: Said balance record is ' + JSON.stringify(balances[datum['data']['currency']]));
+                            var new_balance = parseFloat(balances[datum['data']['currency']]['available']) + parseFloat(datum['data']['amount']);
+//                            l.d('Polo Accnotif: balance update. Modifying ' + datum['data']['currency'] + ' by ' + datum['data']['amount'] + ' (from ' + balances[datum['data']['currency']]['available'] + ' to ' + (parseFloat(balances[datum['data']['currency']]['available']) + parseFloat(datum['data']['amount'])) + ')');
+                            l.d('Polo Accnotif: balance update. Modifying ' + datum['data']['currency'] + ' by ' + datum['data']['amount'] + ' (from ' + balances[datum['data']['currency']]['available'] + ' to ' + new_balance + ')');
+                            balances[datum['data']['currency']]['available'] = new_balance; // TODO: If we need this at all, change onOrders as well.
+                            break;
+                        case 'newLimitOrder':
+                            // We get these both on new orders and on order move. Then it is most important because it contains the new ID.
+                            l.i('Polo Accnotif: Got new limit order: ' + JSON.stringify(datum['data']));
+                            new_order = datum['data'];
+                            mname = datum['data']['currencyPair'];
+                            order_lut[new_order['orderNumber']] = mname;
+                            break;
+                        case 'orderUpdate':
+                            // We get these on moves and partials, then it contains the _old_ id, and on execution. In both cases the amount is 0 (even on partials?)
+                            if (datum['data']['amount'] != 0) {
+                                l.d('Polo Accnotif: Got a non-zero amount orderUpdate. This is a partial fill of a limit order.');
+//                                l.e('Polo Accnotif: Got a non-zero amount orderUpdate. Dunno how to handle this, so I\'ll crash: ' + JSON.stringify(datum['data']));
+//                                process.exit(1);
+                            }
+                            l.d('Polo Accnotif: Got an old order to delete: ' + JSON.stringify(datum['data']));
+                            old_order = datum['data'];
+                            if (old_order['currencyPair'] != null) {
+                                mname = order_lut[old_order['orderNumber']] = old_order['currencyPair']
+                            } else if (order_lut[old_order['orderNumber']] != null) {
+                                mname = order_lut[old_order['orderNumber']];
+                            } else {
+                                if (!init_done()) {
+                                    l.d('Got an orderUpdate actNotif but we do not know which market it belongs to, prolly a stray since in init.');
+                                } else {
+                                    u.crash('Got an orderUpdate actNotif but we do not know which market it belongs to. ' + old_order['orderNumber']);
+/*                                    l.e('Got an orderUpdate actNotif but we do not know which market it belongs to. ' + old_order['orderNumber']);
+                                    handle_error();
+                                    process.exit(1);*/
+                                }
+                            }
+//                                if (mname == null)
+//                                    l.e('Got an order update;
+//                            mname = order_lut[old_order['orderNumber']];
+                            break;
+                        case 'newTrade':
+                            l.d('PoloAccnotif: *** NEW TRADE ***. Yay!: ' + JSON.stringify(datum['data'])); // DONE: Use this data to recalc remining amount! (and no need to do, I think)
+/*                            if (new_trade != null) {
+                                l.e('Polo: Seems we can get more than one new trade per notification. Crashing now. Please change scalar to an array.');
+                                process.exit(1);
+                            }*/
+                            new_trades.push(datum['data']);
+                            break;
+                        default:
+                            u.crash('PoloAccnotif: Unknown message type received. datum=' + JSON.stringify(datum));
+/*                            l.e('PoloAccnotif: Unknown message type received. datum=' + JSON.stringify(datum));
+                            process.exit(1);*/
+                            break;
+                    }
+                }
+                if (new_order == null && old_order == null) {
+                    l.d('Polo Accnotif: Got neither old nor new orders. Not pinging act.');
+                    return;
+                }
+                if (mname != null) {
+                    l.d('PoloAccnotif: returning --');
+                    l.d('PoloAccnotif: old=' + JSON.stringify(old_order));
+                    l.d('PoloAccnotif: new=' + JSON.stringify(new_order));
+                    l.d('PoloAccnotif: trades=' + JSON.stringify(new_trades));
+    	            return markets[mname]['update_orders'](old_order, new_order, new_trades);
+                } else {
+                    l.d('PoloAccnotif: Notif without mname. No one to notify.');
+//                    process.exit(1);
+                }
+            }
         }
 /*
     // Singleton
@@ -95,18 +306,32 @@ module.exports = (function () { // Closure based singleton
 		        if (market == 'USDT_BTC') {
 		            return 'USDT';
 		        } else {
-		            return market.substring(4);
+                    l.d('coin_name_from_market: ' + mname + ' => ' + mname.substring(4));
+		            return mname.substring(4);
 		        }
 		    },
 
-	    	register_market: function (mname, trigger) {
+            balance: function (cname) {
+                l.d('Polo: Fetching balance for ' + cname + ': ' + JSON.stringify(balances[cname]));
+                return balances[cname]['available'] + balances[cname]['onOrders'];
+            },
 
-		        markets[mname] = { 'trigger': trigger };
+            portfolio_value: function () {
+/*                var tot=0;
+                for (var balance in balances) {
+                    tot += balance
+                }*/
+                return acc_balance;
+            },
+
+	    	register_market: function (mname, trigger, update_orders) {
+
+		        markets[mname] = { 'trigger': trigger, 'update_orders': update_orders };
 		        api.subscribe(mname);
-                l.d('Polo: register_market: ' + mname + ' registered. Trigger attached, market websocket stream opened.');
+                l.d('Polo: register_market: ' + mname + ' registered. Trigger and update_orders attached, market websocket stream opened.');
 		    },
 
-            fetch_balances: function (cb=null) {
+/*            fetch_balances: function (cb=null) {
 
 //            l.e('inst before fetching balances: ' + JSON.stringify(inst));
 //	        if (!function.fetching_balances) { // Really? Isn't all locking done on the act level?
@@ -124,13 +349,18 @@ module.exports = (function () { // Closure based singleton
                     if (cb) { cb(); }
                 });
 //        }
-    	    },
+    	    },*/
 
-            cancel_all_orders_and_fetch_balances: function (cb=null) { //TODO
+/*            cancel_all_orders_and_fetch_balances: function (cb=null) { //TODO
+
+                api.
     			return this.fetch_balances(cb);
-    		},
+    		},*/
 
-            cancel_order(order, cb) {
+            cancel_order(order, cb) {   //TODO: DEL
+                u.crash('Polo ' + order['mname'] + ': cancel_order called. How come?');
+/*                l.e('Polo ' + order['mname'] + ': cancel_order called. How come?');
+                process.exit(1);*/
                 if (PAPER_TRADE) {
                     l.w('Polo ' + order['mname'] + ': PAPER_TRADE. Would have canceled old order ' + JSON.stringify(order) + '.');
                     return cb(null);
@@ -150,21 +380,26 @@ module.exports = (function () { // Closure based singleton
                 }
             },
 
-            close_and_reopen: function (old_order, new_order, cb) {
+            close_and_reopen: function (old_order, new_order, cb) {     //TODO: DEL
+                u.crash('Polo ' + order['mname'] + ': close_and_reopen called. How come?');
+/*                l.e('Polo ' + order['mname'] + ': close_and_reopen called. How come?');
+                process.exit(1);*/
                 // TODO: if we really wanna use this fuglinaciousness, we should make sure we're not in a submin partial situation, or we'll fail and lose access to our coins.
 
                 this.cancel_order(old_order, (remaining_order) => {
                     if (remaining_order != null) {
-                        l.e('Polo ' + old_order['mname'] + ': Failed to cancel old order. Will not issue a new one. In fact, let\'s just end it here.');
-                        process.exit(1);
+                        u.crash('Polo ' + old_order['mname'] + ': Failed to cancel old order. Will not issue a new one. In fact, let\'s just end it here.');
+/*                        l.e('Polo ' + old_order['mname'] + ': Failed to cancel old order. Will not issue a new one. In fact, let\'s just end it here.');
+                        process.exit(1);*/
                     }
                     return this.issue_new_order(new_order, cb);
                 });
             },
 
-            replace_orders: function (old_order, new_order, cb) {
+            replace_orders: function (old_order, new_order, cb) { // TODO: DEL
 
-                const broken_move = true; // Poloniex, Goddamn
+                const broken_move = false; // Poloniex, Goddamn. Nah, it's prolly me.
+                l.e('Why are we in replace orders?');
 
                 if (PAPER_TRADE) {
                     l.w(old_order.mname + ' PAPER_TRADE. Would have moved old order ' + JSON.stringify(old_order) + ' to new order ' + JSON.stringify(new_order));
@@ -220,11 +455,12 @@ module.exports = (function () { // Closure based singleton
                     } else {
                         l.d('Polo: About to place a buy order in ' + order['mname']);
                         api.buy(order.mname, order.rate, order.amount, false, false, false, (err, body) => {
-                            if (err) {
+                            u.crash('Failed to issue buy order ' + JSON.stringify(order) + ': err=' + err + ' body=' + body);
+/*                            if (err) {
                                 l.e('Failed to issue buy order ' + JSON.stringify(order) + ': err=' + err + ' body=' + body);
                                 handle_error(err);
                                 return cb(null);
-                            }
+                            }*/
                             l.d('Polo: Buy order placed in ' + order['mname']);
                             return cb(body);
                         });
@@ -236,11 +472,12 @@ module.exports = (function () { // Closure based singleton
                     } else {
                         l.d('Polo: About to place a sell order in ' + order['mname']);
                         api.sell(order.mname, order.rate, order.amount, false, false, false, (err, body) => {
-                            if (err) {
+                            u.crash('Failed to issue sell order ' + JSON.stringify(order) + ': err=' + err + ' body=' + body);
+/*                            if (err) {
                                 l.e('Failed to issue sell order ' + JSON.stringify(order) + ': err=' + err + ' body=' + body);
                                 handle_error(err);
                                 return cb(null);
-                            }
+                            }*/
                             l.d('Polo: Sell order placed in ' + order['mname']);
                             return cb(body);
                         });
@@ -277,11 +514,12 @@ module.exports = (function () { // Closure based singleton
  
     // Get the Singleton instance if one exists
     // or create one if it doesn't
-	    get_instance: function () {		// Why do we need this? Can't we just return the instance from the main?
+	    get_instance: function (cb) {		// Why do we need this? Can't we just return the instance from the main?
+            initialized_cb = cb;
 //l.e('get_instance: inst=' + JSON.stringify(inst));
-			if ( !inst) {
+			if (!inst) {
 //			if (inst == {}) {
-		        inst= init();
+		        inst = init();
                 l.d('get_instance: poloniex singleton initialized - ' + JSON.stringify(inst));
 			}
 			return inst;

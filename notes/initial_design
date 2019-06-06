@@ -20,14 +20,14 @@ Wait               |                                  |             WAIT
  |                 |                                  |
  |-> Updated ob ----                                  |
  |                                                 no |
- |-> Executions -> Could our order have been hit? ----|
+ |-> Executions -> Could our order have been hit? ----|             This has changed. We no longer need to fetch balances, we get it all from Accnotifs.
                                 |                     |
                                 | yes                 |
                                 V                     |
                           Fetch balances              |             BLOCKED (was FETCH_BALANCES (PENDING_ADD / PENDING_REMOVE / PENDING MOVE?) Simply PENDING?)
                                 |                     |
                                 V       no            |
-                              Done? ------------------|
+                              Done? ------------------|             Also, MARKET, which is neither WAIT no BLOCKED and leads only to DONE.
                                 |
                                 | yes
                                 V

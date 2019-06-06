@@ -1,4 +1,5 @@
 const l = require ('./log');
+const nijez = require('./nijez');
 
 module.exports = {
 
@@ -59,6 +60,13 @@ module.exports = {
             l.v(act.mname + ': removed self at ' + act.active_order.rate);
         }
         return ret;
+    },
+
+    crash: function (errstr) {
+        let s = Math.random().toString(36).substring(8) + ' ' + errstr;
+        l.e(errstr + '\nStack: ' + new Error().stack);
+        nijez.nijez(errstr);
+        process.exit(1);
     },
 };
 
